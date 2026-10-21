@@ -312,9 +312,21 @@ for ttt in range(14):
                   # Portfolio metrics
                   P_ret = rets
                   P_vol = returns.std()
-                  P_semivol=semicov
+                  P_semivol=np.sqrt(semicov)
                   P_sharpe = (P_ret - rf) / P_vol
-                  P_sortino = (P_ret - rf) / P_semivol
+                  #P_sortino = (P_ret - rf) / P_semivol
+
+                  rf = 0.23 / 252
+
+                  downside_returns = np.minimum(
+                    returns - rf,
+                    0.0)
+
+                  P_semivol = np.sqrt(
+                    np.mean(downside_returns ** 2))
+
+                  P_sortino = (
+                    returns.mean() - rf) / P_semivol if P_semivol > 0 else np.nan
                   # === New Metrics ===
                   ## 1. Calmar Ratio
                   cumulative_returns = (returns + 1).cumprod()
@@ -329,50 +341,184 @@ for ttt in range(14):
                   ## 2. Excess Return to Value-at-Risk (VaR)
                   excess_return = returns.mean() - rf
                   var_95 = np.percentile(returns, 5)
-                  excess_return_to_var = excess_return / abs(var_95) if var_95 != 0 else np.nan
+                  #excess_return_to_var = excess_return / abs(var_95) if var_95 != 0 else np.nan
 
                   # 3. Excess Return to Conditional Value-at-Risk (CVaR)
                   excess_return = returns.mean() - rf
                   var_95 = np.percentile(returns, 5)
                   cvar_95 = returns[returns <= var_95].mean()
-                  excess_return_to_cvar = excess_return / abs(cvar_95) if cvar_95 != 0 else np.nan
+                  #excess_return_to_cvar = excess_return / abs(cvar_95) if cvar_95 != 0 else np.nan
 
-                  z_ret = (P_ret - np.mean(P_ret)) / (np.std(P_ret) + 1e-8)
+                  # === 95% VaR and CVaR based on daily portfolio returns ===
 
-                  z_sharpe = (P_sharpe - np.mean(P_sharpe)) / (np.std(P_sharpe) + 1e-8)
+                  alpha_tail = 0.05
 
-                  z_sortino = (P_sortino - np.mean(P_sortino)) / (np.std(P_sortino) + 1e-8)
+                  # 5th percentile of daily returns
+                  q05 = float(returns.quantile(alpha_tail))
 
-                  z_var = (
-                    (excess_return_to_var - np.mean(excess_return_to_var))
-                    / (np.std(excess_return_to_var) + 1e-8))
+                  # Returns in the lower 5% tail
+                  tail_returns = returns[returns <= q05]
 
-                  z_cvar = (
-                    (excess_return_to_cvar - np.mean(excess_return_to_cvar))
-                    / (np.std(excess_return_to_cvar) + 1e-8))
+                  # Express risk as a nonnegative loss
+                  var_95 = max(0.0, -q05)
 
-                  reward1 = (
-                        0.5 * z_ret
-                        + 0.5 * z_sharpe)
-                  reward2 = (
-                        0.5 * z_ret
-                        + 0.5 * z_sortino)
-                  reward3 = (
-                        0.5 * z_ret
-                        + 0.5 * z_var)
-                  reward4 = (
-                        0.5 * z_ret
-                        + 0.5 * z_cvar)
-                  reward5 = (
-                        (1/3) * z_ret
-                        + (1/3) * z_cvar+ (1/3) * z_sortino)
+                  cvar_95 = (
+                        max(0.0, -float(tail_returns.mean()))
+                        if not tail_returns.empty
+                        else var_95)
 
+                  # Daily excess return
+                  excess_return = float(returns.mean() - rf)
+
+                  # Numerical protection for RL rewards
+                  eps = 1e-6
+                  reward_clip = 10.0
+
+                  # Excess return-to-VaR
+                  excess_return_to_var = float(np.clip(
+                        excess_return / max(var_95, eps),
+                        -reward_clip,
+                        reward_clip))
+
+                  # Excess return-to-CVaR
+                  excess_return_to_cvar = float(np.clip(
+                        excess_return / max(cvar_95, eps),
+                        -reward_clip,
+                        reward_clip))
+
+
+
+                  # Normalize each component
+                  z_ret =P_ret
+                  z_sharpe = P_sharpe
+                  z_sortino = P_sortino
+                  z_var = excess_return_to_var
+                  z_cvar =excess_return_to_cvar
+
+
+                  # ============================================================
+                  # 1. Select ONLY the overall market index
+                  # ============================================================
+
+                  index_col = '<CLOSE>_Overall Index'
+
+                  index_prices = (
+                    pd.to_numeric(
+                        self.data.iloc[action_t:reward_t + 1][index_col],
+                        errors='coerce'
+                    )
+                    .ffill()
+                  )
+
+                  # Daily index returns
+                  index_returns = (
+                    index_prices
+                    .pct_change(fill_method=None)
+                    .dropna()
+                  )
+
+                  # ============================================================
+                  # 2. Calculate market-index metrics
+                  # ============================================================
+
+                  rf = 0.23 / 252
+                  eps = 1e-6
+                  reward_clip = 10.0
+
+                  # Mean daily return
+                  index_P_ret = float(index_returns.mean())
+
+                  # Daily volatility
+                  index_P_vol = float(index_returns.std(ddof=1))
+
+                  # Daily Sharpe ratio
+                  index_P_sharpe = (
+                    (index_P_ret - rf) / index_P_vol
+                    if index_P_vol > eps
+                    else np.nan
+                  )
+
+                  # Downside deviation relative to daily risk-free rate
+                  index_downside_returns = np.minimum(
+                    index_returns.to_numpy() - rf,
+                    0.0
+                  )
+
+                  index_P_semivol = float(
+                    np.sqrt(np.mean(index_downside_returns ** 2))
+                  )
+
+                  # Daily Sortino ratio
+                  index_P_sortino = (
+                    (index_P_ret - rf) / index_P_semivol
+                    if index_P_semivol > eps
+                    else np.nan
+                  )
+
+                  # ============================================================
+                  # 3. VaR and CVaR at 95% confidence level
+                  # ============================================================
+
+                  alpha_tail = 0.05
+
+                  index_q05 = float(
+                    index_returns.quantile(alpha_tail)
+                  )
+
+                  # Nonnegative loss measures
+                  index_var95 = max(0.0, -index_q05)
+
+                  index_tail_returns = index_returns[
+                    index_returns <= index_q05
+                  ]
+
+                  index_cvar95 = (
+                    max(0.0, -float(index_tail_returns.mean()))
+                    if not index_tail_returns.empty
+                    else index_var95
+                  )
+
+                  # Daily excess return
+                  index_excess_return = index_P_ret - rf
+
+                  # Excess return-to-VaR
+                  index_excess_return_to_var = float(
+                    np.clip(
+                        index_excess_return / max(index_var95, eps),
+                        -reward_clip,
+                        reward_clip
+                    )
+                  )
+
+                  # Excess return-to-CVaR
+                  index_excess_return_to_cvar = float(
+                    np.clip(
+                        index_excess_return / max(index_cvar95, eps),
+                        -reward_clip,
+                        reward_clip
+                    )
+                  )
+
+                  # ============================================================
+                  # 4. Index equivalents of the five reward components
+                  # ============================================================
+
+                  z_ret_index = index_P_ret
+                  z_sharpe_index = index_P_sharpe
+                  z_sortino_index = index_P_sortino
+                  z_var_index = index_excess_return_to_var
+                  z_cvar_index = index_excess_return_to_cvar
+
+                  # Composite rewards
+                  reward1 = 0.5 * (z_ret/z_ret_index) + 0.5 * (z_sharpe/z_sharpe_index)
+                  reward2 = 0.5 * (z_ret/z_ret_index) + 0.5 * (z_sortino/z_sortino_index)
+                  reward3 = 0.5 * (z_ret/z_ret_index) + 0.5 * (z_var/z_var_index)
+                  reward4 = 0.5 * (z_ret/z_ret_index) + 0.5 * (z_cvar/ z_cvar_index)
+
+                  reward5 = ((z_ret/z_ret_index) + (z_cvar/ z_cvar_index) + (z_sortino/z_sortino_index)) / 3
 
                   reward6 = (
-                        0.25 * z_ret
-                        + 0.25 * z_sharpe
-                        + 0.25 * z_sortino
-                        + 0.25 * z_cvar)
+                        (z_ret/z_ret_index) + (z_sharpe/z_sharpe_index) + (z_sortino/z_sortino_index) + (z_cvar/ z_cvar_index)) / 4
 
                   return np.array([P_ret, P_vol,P_semivol, P_sharpe,P_sortino, calmar_ratio, excess_return_to_var,excess_return_to_cvar,reward1,reward2, reward3, reward4, reward5, reward6])
 
@@ -437,7 +583,7 @@ for ttt in range(14):
             ]
 
             data_period = (
-                self.data.iloc[action_t:reward_t][close_columns]
+                self.data.iloc[action_t:reward_t+1][close_columns]
                 .ffill()
                 .bfill()
             )
@@ -551,49 +697,47 @@ for ttt in range(14):
 
             # ============================================================
             # 11. NET DAILY RETURNS
-            #
-            # IMPORTANT:
-            # The first return is measured relative to CAPITAL BEFORE
-            # transaction cost. Therefore transaction cost is included
-            # in the first return of this period.
+            # Exactly one return per daily price interval.
+            # Transaction costs are included in the first daily return.
             # ============================================================
 
             portfolio_values = port.to_numpy(dtype=float)
 
-            returns_array = np.zeros(
-                len(portfolio_values),
-                dtype=float
+            if len(portfolio_values) < 2:
+              raise ValueError(
+                "At least two portfolio values are required."
+              )
+
+            # Number of daily returns = number of portfolio values - 1
+            returns_array = np.empty(
+              len(portfolio_values) - 1,
+              dtype=float
             )
 
-            if len(portfolio_values) > 0:
+            # First day's return includes transaction costs
+            returns_array[0] = (
+              portfolio_values[1] / capital_before_cost
+            ) - 1.0
 
-                # First return includes transaction cost
-                returns_array[0] = (
-                    portfolio_values[0] /
-                    capital_before_cost
-                ) - 1.0
-
-
-            if len(portfolio_values) > 1:
-
-                # Subsequent daily returns
+            # Remaining daily returns
+            if len(portfolio_values) > 2:
                 returns_array[1:] = (
-                    portfolio_values[1:] /
-                    portfolio_values[:-1]
-                ) - 1.0
+                portfolio_values[2:] /
+                portfolio_values[1:-1]
+              ) - 1.0
 
-
+            # Align returns with the dates on which each interval ends
             returns = pd.Series(
-                returns_array,
-                index=port.index
+              returns_array,
+              index=port.index[1:],
+              dtype=float
             )
 
             returns = (
-                returns
-                .replace([np.inf, -np.inf], 0.0)
-                .fillna(0.0)
+              returns
+              .replace([np.inf, -np.inf], np.nan)
+              .fillna(0.0)
             )
-
 
             # ============================================================
             # 12. FINAL CAPITAL
@@ -1131,102 +1275,376 @@ for ttt in range(14):
 
 
 
-        def nn_pred_to_weights(self, pred, allow_short = False):
+        import random
+        import numpy as np
 
-            weights = np.zeros(len(pred))
-            raw_weights = np.argmax(pred, axis=-1)
 
-            saved_min = None
+        # ============================================================
+        # Helper 1: Convert model output to (n_assets, action_size)
+        # ============================================================
 
-            for e, r in enumerate(raw_weights):
-                if r == 0: # sit
-                    weights[e] = 0
-                elif r == 1: # buy
-                    weights[e] = np.abs(pred[e][0][r])
-                else:
-                    weights[e] = -np.abs(pred[e][0][r])
-            #sum of absolute values in short is allowed
-            if not allow_short:
-                weights += np.abs(np.min(weights))
-                saved_min = np.abs(np.min(weights))
-                saved_sum = np.sum(weights)
+        def _q_matrix(self, pred):
+
+            n_assets = self.portfolio_size - 311
+
+            if isinstance(pred, (list, tuple)):
+
+                rows = []
+
+                for p in pred:
+                    q = np.asarray(p, dtype=float)
+
+                    if q.size != self.action_size:
+                        raise ValueError(
+                            "Unexpected Q-output shape."
+                        )
+
+                    rows.append(q.reshape(self.action_size))
+
+                q_values = np.vstack(rows)
+
             else:
-                saved_sum = np.sum(np.abs(weights))
 
-            weights /= saved_sum
-            return weights, saved_min, saved_sum
-        #return the action based on the state, uses the NN function
+                arr = np.asarray(pred, dtype=float)
+
+                if (
+                    arr.ndim == 3
+                    and arr.shape[0] == 1
+                    and arr.shape[1:] == (
+                        n_assets, self.action_size
+                    )
+                ):
+                    q_values = arr[0]
+
+                elif arr.shape == (
+                    n_assets, self.action_size
+                ):
+                    q_values = arr
+
+                elif arr.shape == (
+                    1, n_assets * self.action_size
+                ):
+                    q_values = arr.reshape(
+                        n_assets, self.action_size
+                    )
+
+                else:
+                    raise ValueError(
+                        f"Unexpected model output shape: {arr.shape}"
+                    )
+
+            if q_values.shape != (
+                n_assets, self.action_size
+            ):
+                raise ValueError(
+                    f"Expected {(n_assets, self.action_size)}, "
+                    f"got {q_values.shape}"
+                )
+
+            return q_values
+
+
+        # ============================================================
+        # Helper 2: Convert signed scores to portfolio weights
+        # ============================================================
+
+        def _scores_to_weights(self, signed_scores, allow_short=False):
+
+            scores = np.asarray(
+                signed_scores, dtype=float
+            ).copy()
+
+            if not np.all(np.isfinite(scores)):
+                raise ValueError(
+                    "Non-finite portfolio scores."
+                )
+
+            if not allow_short:
+
+                # Long-only portfolio
+                scores = np.maximum(scores, 0.0)
+                denominator = scores.sum()
+
+            else:
+
+                # Normalize gross exposure for long-short weights
+                denominator = np.abs(scores).sum()
+
+            if denominator <= 1e-12:
+
+                # Zero allocation means all capital remains as cash
+                return np.zeros_like(scores)
+
+            return scores / denominator
+
+
+        # ============================================================
+        # 1. Convert Q-values to portfolio weights
+        # ============================================================
+
+        def nn_pred_to_weights(self, pred, allow_short=False):
+
+            q_values = self._q_matrix(pred)
+
+            n_assets = self.portfolio_size - 311
+
+            # Action IDs: 0 = sit, 1 = buy, 2 = sell
+            action_ids = np.argmax(
+                q_values, axis=1
+            ).astype(int)
+
+            signed_scores = np.zeros(
+                n_assets, dtype=float
+            )
+
+            for i, a in enumerate(action_ids):
+
+                if a == 0:
+                    # Sit: zero target exposure
+                    signed_scores[i] = 0.0
+
+                elif a == 1:
+                    # Buy: use the advantage over sit
+                    signed_scores[i] = max(
+                        q_values[i, 1] - q_values[i, 0],
+                        0.0
+                    )
+
+                elif a == 2:
+                    # Sell: negative exposure if shorting is allowed
+                    signed_scores[i] = -max(
+                        q_values[i, 2] - q_values[i, 0],
+                        0.0
+                    )
+
+            weights = self._scores_to_weights(
+                signed_scores,
+                allow_short=allow_short
+            )
+
+            # Return exact discrete actions for Q-learning,
+            # not inferred actions reconstructed from normalized weights.
+            return weights, action_ids
+
+
+        # ============================================================
+        # 2. Select an action
+        # ============================================================
+
         def act(self, state):
 
-            if not self.is_eval and random.random() <= self.epsilon:
-                w = np.random.normal(0, 1, size = (self.portfolio_size-311, ))
+            n_assets = self.portfolio_size - 311
 
-                saved_min = None
+            # Epsilon-greedy exploration
+            if (
+                not self.is_eval
+                and random.random() <= self.epsilon
+            ):
 
-                if not self.allow_short:
-                    w += np.abs(np.min(w))
-                    saved_min = np.abs(np.min(w))
+                # Randomly select a discrete action for each asset
+                action_ids = np.random.randint(
+                    0,
+                    self.action_size,
+                    size=n_assets
+                )
 
-                saved_sum = np.sum(w)
-                w /= saved_sum
-                return w , saved_min, saved_sum
-            pred = self.model.predict(np.expand_dims(state.values, 0))
-            return self.nn_pred_to_weights(pred, self.allow_short)
+                # Random positive magnitudes; signs encode buy/sell
+                strengths = np.random.uniform(
+                    0.01, 1.0, size=n_assets
+                )
+
+                signed_scores = np.zeros(
+                    n_assets, dtype=float
+                )
+
+                for i, a in enumerate(action_ids):
+
+                    if a == 0:
+                        signed_scores[i] = 0.0
+
+                    elif a == 1:
+                        signed_scores[i] = strengths[i]
+
+                    elif a == 2:
+                        signed_scores[i] = -strengths[i]
+
+                weights = self._scores_to_weights(
+                    signed_scores,
+                    allow_short=self.allow_short
+                )
+
+                return weights, action_ids
+
+            # Greedy action from the network
+            state_values = (
+                state.values
+                if hasattr(state, "values")
+                else np.asarray(state)
+            )
+
+            pred = self.model.predict(
+                np.expand_dims(state_values, axis=0),
+                verbose=0
+            )
+
+            return self.nn_pred_to_weights(
+                pred,
+                allow_short=self.allow_short
+            )
+
+
+        # ============================================================
+        # 3. DQN experience replay
+        # ============================================================
 
         def expReplay(self, batch_size):
 
-            def weights_to_nn_preds_with_reward(action_weights,
-                                                reward,
-                                                Q_star = np.zeros((self.portfolio_size-311, self.action_size))):
+            if not self.memory4replay:
+                return
 
-                Q = np.zeros((self.portfolio_size-311, self.action_size))
-                for i in range(self.portfolio_size-311):
-                    if action_weights[i] == 0:
-                        Q[i][0] = reward[i] + self.gamma * np.max(Q_star[i][0])
-                    elif action_weights[i] > 0:
-                        Q[i][1] = reward[i] + self.gamma * np.max(Q_star[i][1])
-                    else:
-                        Q[i][2] = reward[i] + self.gamma * np.max(Q_star[i][2])
-                return Q
+            n_assets = self.portfolio_size - 311
 
-            def restore_Q_from_weights_and_stats(action):
-                action_weights, action_min, action_sum = action[0], action[1], action[2]
-                action_weights = action_weights * action_sum
-                if action_min != None:
-                    action_weights = action_weights - action_min
-                return action_weights
+            def state_to_array(state):
 
-            for (s, s_, action, reward, done) in self.memory4replay:
+                if hasattr(state, "values"):
+                    state = state.values
 
-                action_weights = restore_Q_from_weights_and_stats(action)
-                #Reward =reward if not in the terminal state.
-                Q_learned_value = weights_to_nn_preds_with_reward(action_weights, reward)
-                s, s_ = s.values, s_.values
+                return np.asarray(
+                    state, dtype=np.float32
+                )
 
+            def predict_q_heads(state):
+
+                state_values = state_to_array(state)
+
+                prediction = self.model.predict(
+                    np.expand_dims(state_values, axis=0),
+                    verbose=0
+                )
+
+                # This version assumes one output head per asset,
+                # matching the architecture used in your original code.
+                if not isinstance(prediction, (list, tuple)):
+                    raise ValueError(
+                        "Expected a list of Q-value outputs, "
+                        "one output head per asset."
+                    )
+
+                if len(prediction) != n_assets:
+                    raise ValueError(
+                        f"Expected {n_assets} output heads, "
+                        f"received {len(prediction)}."
+                    )
+
+                heads = []
+
+                for q in prediction:
+
+                    q = np.asarray(
+                        q, dtype=np.float32
+                    )
+
+                    if q.size != self.action_size:
+                        raise ValueError(
+                            "Incorrect Q-value output size."
+                        )
+
+                    heads.append(
+                        q.reshape(1, self.action_size).copy()
+                    )
+
+                return heads
+
+            # Sample a minibatch of transitions
+            minibatch = random.sample(
+                self.memory4replay,
+                min(batch_size, len(self.memory4replay))
+            )
+
+            for state, next_state, action, reward, done in minibatch:
+
+                # action is now: (portfolio_weights, discrete_action_ids)
+                weights = np.asarray(
+                    action[0], dtype=float
+                )
+
+                action_ids = np.asarray(
+                    action[1], dtype=int
+                ).reshape(-1)
+
+                if action_ids.size != n_assets:
+                    raise ValueError(
+                        "Number of stored actions does not match "
+                        "the number of assets."
+                    )
+
+                # Current Q-values
+                q_current = predict_q_heads(state)
+
+                # Preserve estimates for all unselected actions
+                q_targets = [
+                    q.copy() for q in q_current
+                ]
+
+                # Normalize reward representation
+                rewards = np.asarray(
+                    reward, dtype=float
+                ).reshape(-1)
+
+                if rewards.size == 1:
+                    rewards = np.full(
+                        n_assets,
+                        rewards.item(),
+                        dtype=float
+                    )
+
+                elif rewards.size != n_assets:
+                    raise ValueError(
+                        f"Expected a scalar reward or {n_assets} "
+                        f"asset rewards, received {rewards.size}."
+                    )
+
+                # Next-state Q-values are unnecessary for terminal transitions
                 if not done:
-                    # reward + gamma * Q^*(s_, a_)
-                    Q_star = self.model.predict(np.expand_dims(s_, 0))
-                    Q_learned_value = weights_to_nn_preds_with_reward(action_weights, reward, np.squeeze(Q_star))
+                    q_next = predict_q_heads(next_state)
 
-                Q_learned_value = [xi.reshape(1, -1) for xi in Q_learned_value]
-                Q_current_value = self.model.predict(np.expand_dims(s, 0))
-                Q = [np.add(a * (1-self.alpha), q * self.alpha) for a, q in zip(Q_current_value, Q_learned_value)]
+                # Bellman target for the action actually selected
+                for i in range(n_assets):
 
-                # update current Q function with new optimal value
+                    a_i = int(action_ids[i])
 
-                self.model.fit(np.expand_dims(s, 0), Q, epochs=1, verbose=0)
-            if self.epsilon > self.epsilon_min:
-                self.epsilon *= self.epsilon_decay
-                Q_learned_value = [xi.reshape(1, -1) for xi in Q_learned_value]
-                Q_current_value = self.model.predict(np.expand_dims(s, 0))
-                Q = [np.add(a * (1-self.alpha), q * self.alpha) for a, q in zip(Q_current_value, Q_learned_value)]
+                    if not 0 <= a_i < self.action_size:
+                        raise ValueError(
+                            f"Invalid action index: {a_i}"
+                        )
 
-                # update current Q function with new optimal value
+                    target = float(rewards[i])
 
-                self.model.fit(np.expand_dims(s, 0), Q, epochs=1, verbose=0)
-            if self.epsilon > self.epsilon_min:
-                self.epsilon *= self.epsilon_decay
+                    if not done:
+                        target += self.gamma * float(
+                            np.max(q_next[i][0])
+                        )
 
+                    # Update ONLY the selected action's target.
+                    # Other actions retain their current Q estimates.
+                    q_targets[i][0, a_i] = target
+
+                state_values = state_to_array(state)
+
+                self.model.fit(
+                    np.expand_dims(state_values, axis=0),
+                    q_targets,
+                    epochs=1,
+                    verbose=0
+                )
+
+            # Decay epsilon once per replay call, not twice
+            if not self.is_eval and self.epsilon > self.epsilon_min:
+
+                self.epsilon = max(
+                    self.epsilon_min,
+                    self.epsilon * self.epsilon_decay
+                )
 
 
 
@@ -2292,7 +2710,7 @@ for ttt in range(14):
 
         print(f"Episode {e + 1}/{max_episodes}, epsilon = {agent.epsilon:.4f}")
 
-        s = env.get_state(np.random.randint(window_size + 1, data_length - 505 - window_size - 1), window_size)
+        #s = env.get_state(np.random.randint(window_size + 1, data_length - 505 - window_size - 1), window_size)
         total_profit = 0
         W0 = [0. for _ in range(N_ASSETS - 311)]
         W0eq = [0. for _ in range(N_ASSETS - 311)]
@@ -2308,9 +2726,16 @@ for ttt in range(14):
         initial_capitalppo = 1000.0 
         returns_history_ppo = [] 
         rewards_history_ppo = []
+        train_end = data_length - 506
 
-        for t in range(window_size, data_length - 525, rebalance_period):
-            date1 = t - rebalance_period
+        for t in range(
+                window_size,
+                train_end - rebalance_period,
+                rebalance_period):
+
+
+            #date1 = t - rebalance_period
+            next_t = t + rebalance_period
 
             s_ = env.get_state(t, window_size)
             action = agent.act(s_)
@@ -2325,14 +2750,14 @@ for ttt in range(14):
             actions_to_show.append(action[0])
             diffc.append(action[0] - actions_to_show1)
 
-            ( weighted_returnsppo, rewardppo, WW0ppo, initial_capitalppo1 ) = env.get_reward( actionppo, date1, t, W0ppo, initial_capitalppo )
+            ( weighted_returnsppo, rewardppo, WW0ppo, initial_capitalppo1 ) = env.get_reward( actionppo, t, next_t, W0ppo, initial_capitalppo )
 
-            weighted_returns, reward, WW0, initial_capital1 = env.get_reward(action[0], date1, t, W0, initial_capital)
+            weighted_returns, reward, WW0, initial_capital1 = env.get_reward(action[0], t, next_t, W0, initial_capital)
             weighted_returns_equal, reward_equal, WW0eq, initial_capital1eq = env.get_reward(
-                np.ones(agent.portfolio_size - 311) / (agent.portfolio_size - 311), date1, t, W0eq, initial_capitaleq)
+                np.ones(agent.portfolio_size - 311) / (agent.portfolio_size - 311), t, next_t, W0eq, initial_capitaleq)
 
             rewardppo = float( np.mean( np.asarray(rewardppo) ) )
-            ppo_agent.remember( s_, raw_action, rewardppo, value, log_prob, False )
+            #ppo_agent.remember( s_, raw_action, rewardppo, value, log_prob, False )
 
             returns_history_ppo.extend( weighted_returnsppo ) 
             rewards_history_ppo.append( rewardppo )
@@ -2345,7 +2770,7 @@ for ttt in range(14):
             returns_window = returns_window.iloc[ :, :N_ASSETS - 311 ]
             minvar_action = minimum_variance_weights(returns_window)
 
-            weighted_returns_minvar, reward_minvar, WW0minvar, initial_capital_minvar =  env.get_reward( minvar_action, date1, t, W0minvar, initial_capital_minvar )
+            weighted_returns_minvar, reward_minvar, WW0minvar, initial_capital_minvar =  env.get_reward( minvar_action, t, next_t, W0minvar, initial_capital_minvar )
 
             rewards_history.append(reward)
             equal_rewards.append(reward_equal)
@@ -2362,17 +2787,47 @@ for ttt in range(14):
             W0minvar = WW0minvar
             initial_capital_minvar = initial_capital_minvar
 
-            done = (t == data_length)
+            #done = (t == data_length)
+            next_state = env.get_state(next_t,window_size)
+            done = (next_t + rebalance_period >= train_end)
 
-            agent.memory4replay.append((s, s_, action, reward, done))
+            ppo_agent.remember(
+                s_,
+                raw_action,
+                rewardppo,
+                value,
+                log_prob,
+                done
+            )
+
+
+            agent.memory4replay.append((s_,next_state , action, reward, done))
+
+
             if len(agent.memory4replay) >= batch_size:
                 agent.expReplay(batch_size)
                 agent.memory4replay = []
 
-            s = s_
+            #s = s_
 
-        ppo_agent.memory[-1] = ( ppo_agent.memory[-1][0], ppo_agent.memory[-1][1], ppo_agent.memory[-1][2], ppo_agent.memory[-1][3], ppo_agent.memory[-1][4], True ) 
-        ppo_agent.train( epochs=50 )
+        #ppo_agent.memory[-1] = ( ppo_agent.memory[-1][0], ppo_agent.memory[-1][1], ppo_agent.memory[-1][2], ppo_agent.memory[-1][3], ppo_agent.memory[-1][4], True ) 
+        
+        if ppo_agent.memory:
+            # Mark the final PPO transition as terminal
+            last = ppo_agent.memory[-1]
+
+            ppo_agent.memory[-1] = (
+                last[0],
+                last[1],
+                last[2],
+                last[3],
+                last[4],
+                True
+            )
+
+            ppo_agent.train(epochs=50)
+
+        #ppo_agent.train( epochs=50 )
         print( "Episode finished." )
 
         # Plot results (optional, you can move outside the loop if desired)
@@ -2531,22 +2986,21 @@ for ttt in range(14):
     initial_capital_max_sharpe = float(1000)
     lookback = 63
 
-    test_start = len(env.data) - 525
+    test_start = len(env.data) - 506
     test_end = len(env.data)
+    last_idx = test_end - 1         # Last valid data index
+
     t = test_start
     
     #for t in range(len(env.data)-505, len(env.data), rebalance_period):
-    while t < test_end:
+    while t < last_idx:
 
-
-        #date1 = t-rebalance_period
-
-        next_t = min(t + rebalance_period, test_end)
         date1 = t
-        t = next_t
+        next_t = min(date1 + rebalance_period, last_idx)
 
+        # State at the beginning of the holding period
+        s_ = env.get_state(date1, window_size)
 
-        s_ = env.get_state(t, window_size)
         action = agent.act(s_)
         actions_to_showtest.append(action[0])
         actionppo, value, log_prob, raw_action = ppo_agent.act(s_,deterministic=True)
@@ -2572,25 +3026,26 @@ for ttt in range(14):
         print("Raw action std:",np.std(raw_action))
 
 
-        weighted_returnsppo, rewardppo, WW0ppo, initial_capitalppo1 = env.get_reward(actionppo,date1,t,W0ppo,initial_capitalppo)
+        weighted_returnsppo, rewardppo, WW0ppo, initial_capitalppo1 = env.get_reward(actionppo,date1,next_t,W0ppo,initial_capitalppo)
 
-        weighted_returns, reward,WW0,initial_capital1 = env.get_reward(action[0], date1, t,W0,initial_capital)
+        weighted_returns, reward,WW0,initial_capital1 = env.get_reward(action[0], date1, next_t,W0,initial_capital)
         weighted_returns_equal, reward_equal,WW0eq,initial_capital1eq = env.get_reward(
-            np.ones((agent.portfolio_size)-311) / ((agent.portfolio_size)-311), date1, t,W0eq,initial_capitaleq)
+            np.ones((agent.portfolio_size)-311) / ((agent.portfolio_size)-311), date1, next_t,W0eq,initial_capitaleq)
 
         start_idx = max( 0, t - lookback )
-        returns_window = env.get_state(t, window_size)
-        returns_window = returns_window.iloc[ :, :((agent.portfolio_size)-311) ]
+        #returns_window = env.get_state(t, window_size)
+        #returns_window = returns_window.iloc[ :, :((agent.portfolio_size)-311) ]
+        returns_window = s_.iloc[:, :((agent.portfolio_size)-311)]
 
         minvar_action = minimum_variance_weights( returns_window )
         markowitz_action = markowitz_weights( returns_window )
         risk_parity_action = risk_parity_weights( returns_window )
         max_sharpe_action = max_sharpe_weights( returns_window )
 
-        weighted_returns_minvar, reward_minvar,WW0minvar, initial_capital_minvar1 = env.get_reward( minvar_action, date1, t, W0minvar, initial_capital_minvar )
-        weighted_returns_markowitz, reward_markowitz,WW0markowitz, initial_capital_markowitz1 = env.get_reward( markowitz_action, date1, t, W0markowitz, initial_capital_markowitz )
-        weighted_returns_risk_parity, reward_risk_parity,WW0risk_parity, initial_capital_risk_parity1 = env.get_reward( risk_parity_action, date1, t, W0risk_parity, initial_capital_risk_parity )
-        weighted_returns_max_sharpe, reward_max_sharpe,WW0max_sharpe, initial_capital_max_sharpe1 = env.get_reward( max_sharpe_action, date1, t, W0max_sharpe, initial_capital_max_sharpe )
+        weighted_returns_minvar, reward_minvar,WW0minvar, initial_capital_minvar1 = env.get_reward( minvar_action, date1, next_t, W0minvar, initial_capital_minvar )
+        weighted_returns_markowitz, reward_markowitz,WW0markowitz, initial_capital_markowitz1 = env.get_reward( markowitz_action, date1, next_t, W0markowitz, initial_capital_markowitz )
+        weighted_returns_risk_parity, reward_risk_parity,WW0risk_parity, initial_capital_risk_parity1 = env.get_reward( risk_parity_action, date1, next_t, W0risk_parity, initial_capital_risk_parity )
+        weighted_returns_max_sharpe, reward_max_sharpe,WW0max_sharpe, initial_capital_max_sharpe1 = env.get_reward( max_sharpe_action, date1, next_t, W0max_sharpe, initial_capital_max_sharpe )
 
 
         W0ppo=WW0ppo
@@ -2645,6 +3100,7 @@ for ttt in range(14):
         result_max_sharpe.append( weighted_returns_max_sharpe.tolist() )
         meanresult_max_sharpe.append( np.mean( np.asarray( weighted_returns_max_sharpe ) ) ) 
         actions_max_sharpe.append( max_sharpe_action )
+        t = next_t
 
     # ==============================
     # Market Index Returns
@@ -2660,7 +3116,7 @@ for ttt in range(14):
         columns={'Unnamed: 1': 'Overall Index'}
     )
 
-    dataind = dataind[len(env.data)-525:len(env.data)]
+    dataind = dataind[len(env.data)-505:len(env.data)]
 
     dataind = dataind.reset_index(drop=True)
 
